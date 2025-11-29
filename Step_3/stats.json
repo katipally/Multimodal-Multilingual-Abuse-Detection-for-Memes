@@ -1,0 +1,16 @@
+{
+  "total_manifest_records": 51,
+  "packed_examples": 50,
+  "failed_examples": 0,
+  "failure_rate": 0.0,
+  "split_counts": {
+    "train": 51
+  },
+  "split_packed": {
+    "train": 50
+  },
+  "dataset_packed": {
+    "hateful_memes": 50
+  },
+  "elapsed_seconds": 0.7051599025726318
+}

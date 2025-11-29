@@ -1,0 +1,65 @@
+Multimodal Hate/Abuse Detection 
+STEP 1 — DATASETS (BY TYPE)
+1A) Memes / Images (image + overlaid text)
+	•	Hateful Memes (Facebook AI / NeurIPS 2020): https://ai.facebook.com/blog/hateful-memes-challenge-and-data-set/ Alt: Hugging Face mirror: https://huggingface.co/datasets/neuralcatcher/hateful_memes
+	•	MAMI (SemEval 2022, misogyny in memes): https://github.com/MIND-Lab/SemEval2022-Task-5-Multimedia-Automatic-Misogyny-Identification-MAMI-
+	•	MMHS150K (Twitter multimodal hate): https://service.tib.eu/ldmservice/dataset/mmhs150k 
+	•	Memotion 1.0: https://arxiv.org/abs/2008.03781 
+	•	Memotion 2.0: https://ceur-ws.org/Vol-3199/paper20.pdf
+1B) Text‑Only (auxiliary supervision)
+	•	HateXplain (with rationales): https://github.com/hate-alert/HateXplain 
+	•	OLID / OffensEval 2019: https://sites.google.com/site/offensevalsharedtask/olid
+1C) Video (short clips)
+	•	No standard public, large, labeled hate‑video set. For class projects: use short clips that accompany meme posts (where permitted) or collect a small, consented set. We will extract speech and a few frames per clip for modeling.
+1D) Diagnostic Suites (evaluation only)
+	•	HateCheck (EN): https://aclanthology.org/2021.acl-long.4/ 
+	•	Multilingual HateCheck (10 languages): https://aclanthology.org/2022.woah-1.15/
+Outputs: data_manifest.jsonl (unified schema), /data/{raw,interim,processed} filled. Quality Gates: ≥95% media paths valid; 100% label mapping to your taxonomy; license notes stored per dataset.
+
+STEP 2 — EXTRACT TEXT FROM IMAGES & VIDEO (OCR & ASR)
+2A) OCR (memes/images)
+Prerequisites: PaddleOCR PP‑OCRv5 (2025 build) with needed language packs. Inputs: images. Procedure: (i) RGB normalize; long side ≤1024 px. (ii) Run detection+recognition; save per line {text, bbox_xyxy, conf}. (iii) Save QC overlays with boxes/text. (iv) Optional: refine detections with SAM‑2 using OCR boxes as prompts; drop low‑IoU text. Outputs: processed/ocr.jsonl, /exp/ocr_qc/*.png. Quality Gates: failure rate <10%; avg conf ≥0.70 (EN) / locale thresholds set; 100‑line gold sample CER ≤0.20.
+2B) ASR (short videos)
+Prerequisites: VAD (Silero/pyannote), Whisper‑large‑v3. Inputs: videos. Procedure: (i) Extract mono 16 kHz WAV. (ii) Run VAD; keep speech segments. (iii) Transcribe with Whisper‑v3; keep {text, t_start, t_end, conf}. (iv) Hallucination guard: re‑run on muted audio; if tokens appear, flag segment unsafe and exclude. Outputs: processed/asr.jsonl with segments and flags. Quality Gates: unsafe fraction <1%; manual WER on 30 clips ≤25%.
+
+STEP 3 — PACK EACH EXAMPLE (ONE BUNDLE)
+Prerequisites: tokenizer for text model; SigLIP‑2 image preprocessor. Inputs: image, optional frames, OCR lines, ASR segments, original caption/text, labels, language tag. Procedure: (i) Build text field: OCR → ASR → caption, separated by special tokens and <lang=...>. (ii) Resize image to model default (e.g., 384×384); keep original for viz. (iii) Create hard negatives by pairing image with topically similar but mismatched text (in‑batch). (iv) Serialize to shards (5–10k items/shard) for train/val/test. Outputs: /processed/shards/{train,val,test}/*.tar, split files. Quality Gates: packing failures <0.5%; no hash duplicates across splits; per‑class distribution within ±5% across splits.
+
+STEP 4 — TRAIN UNIMODAL EXPERTS (DETAILED)
+4A) Text‑Only Expert
+Backbone: mDeBERTa‑v3‑base (multilingual). Pre‑tune: DAPT/TAPT on in‑domain text (OCR/ASR/captions) — masked LM for 30–50k steps. Classifier: multi‑task heads → abuse (sigmoid/BCE‑with‑logits), targets (multi‑label), explicitness (softmax CE), severity (ordinal or CE). Anti‑obfuscation branch: add small char‑CNN over raw characters (kernel sizes 3/5/7), concat to token‑level representation. Optimization (typical): AdamW (β1 0.9, β2 0.98, wd 0.01), cosine LR, warmup 10%, grad‑clip 1.0, mixed precision. Batching: effective BS≈128–256 sequences via grad‑accum if needed. Stop: early‑stop on dev macro‑F1 (patience 3). Artifacts: models/text_cls.pt.
+4B) Image‑Only Expert (memes)
+Backbone: SigLIP‑2 (ViT‑B/L as budget allows). Adaptation: LoRA on top 2–4 transformer blocks (rank r=8–16), heads frozen; head: pooled tokens → multi‑task outputs. Loss: main supervised losses + optional image↔text region alignment (if OCR branch used). Augmentations: mild JPEG/blur, crop/pad; MixUp (α 0.2–0.4) and CutMix (β 1.0) with low probability. Artifacts: models/vision_cls.pt (+ vision_ocr_aug.pt if region alignment used).
+4C) Audio‑Only Expert (speech)
+Backbone: Whisper‑large‑v3 features only (Whisper frozen). Head: segment‑pooled features → MLP for multi‑task outputs. Policy: drop unsafe ASR segments; weight segments by ASR confidence. Artifacts: models/audio_cls.pt.
+Shared deep‑learning upgrades (applied across 4A–4C): • Class imbalance: class‑balanced sampling + focal loss (γ 1–2) on rare targets. • Hard‑negative mining: refresh queue every epoch with visually/textually similar but label‑different items. • Step budgets (1–4 GPUs): Text 20–50k steps; Vision 40–80k; Audio 10–30k. Prefer early stopping over fixed epochs.
+Quality Gates: each expert beats trivial baselines; calibrated ECE ≤0.07 after Step 6; stable training curves.
+
+STEP 5 — BUILD THE MULTIMODAL MODEL (FUSION, DETAILED)
+Backbones: SigLIP‑2 (vision), mDeBERTa‑v3 (text), Whisper‑v3 features (audio); optional InternVideo2 frame features. Resampler: Perceiver‑Resampler reducing visual/frame tokens to 64–128 latent tokens. Fusion block: 2–4 layers of gated cross‑attention (text ↔ visual latents). Modality inputs: (i) text (OCR + ASR + caption), (ii) visual latents, (iii) optional frame latents. ModDrop: randomly drop a full modality (p≈0.25) during training. Multi‑task heads: same as Step 4 (shared across modalities after fusion).
+Training schedule: • Stage A (Warm‑up, encoders frozen) — 50–100k steps; optimize supervised losses + contrastive (image↔text, frame↔text) using in‑batch hard negatives. • Stage B (Joint LoRA on encoders) — 150–300k steps; enable LoRA (r=8–16) on top layers of text & vision; keep most weights frozen; continue ModDrop and contrastive. • Loss balancing: start equal weights → switch to uncertainty weighting or GradNorm once losses stabilize. • Regularization: dropout 0.1–0.2 on fusion, weight decay 0.01, grad‑clip 1.0. Artifacts: models/mm_fusion.pt + training/eval logs.
+Quality Gates: Fusion ≥ +3 macro‑F1 over best unimodal on dev; ablations show non‑collapse (text‑only / image‑only both worse than fusion); no divergence when a modality is absent.
+
+STEP 6 — RELIABILITY, CALIBRATION, BALANCING (DETAILED)
+Goal: make outputs trustworthy and robust.
+6.1 Calibration • Hold out a calibration set (not used in training). • Fit temperature scaling per prediction head; store calibration.json. • Choose operating thresholds (maximize macro‑F1 or set target recall). Pass: ECE ≤0.05; Brier score improves.
+6.2 Class/Domain Balancing • Use class‑balanced sampler; for multi‑label targets apply focal loss (γ 1–2). • Group‑aware batching: maintain language and dataset diversity per batch. Pass: per‑class F1 not worse than (macro‑F1 − 15 pp).
+6.3 Quality‑Aware Gating • Inputs: OCR mean confidence, OCR coverage (text pixels/area), ASR mean conf, ASR unsafe ratio, text length features. • Small gating MLP outputs per‑modality weights in [0,1]; scale modality representations before fusion head. • Training: auxiliary loss to prefer higher weights when quality is high. Pass: robustness test shows ≤20% relative F1 drop when removing any one modality; larger drops when removing the highest‑quality modality (sanity check).
+Artifacts: calibration.json, thresholds.json, gating_policy.json, reliability plots.
+
+STEP 7 — EVALUATION (ACCURACY, FUNCTIONALITY, ROBUSTNESS)
+Standard: macro/micro‑F1, PR‑AUC, confusion matrices on held‑out test. Functional: run HateCheck (EN) and Multilingual HateCheck; report pass‑rates per function and per language. Ablations: text‑only, image‑only, drop‑OCR, drop‑ASR, ModDrop off; report changes. Robustness: mild blur/JPEG on text regions; inject [NO‑SPEECH] segments; verify model stability. Significance: paired bootstrap (≥1k resamples) for fusion vs. best unimodal.
+Pass: fusion beats unimodal; functional pass‑rates meet targets; calibrated; robustness OK.
+Artifacts: /eval/report.md, raw predictions, metrics JSON, reliability plots.
+
+STEP 8 — FINAL INFERENCE PIPELINE (DELIVERABLE)
+Interface: CLI/REST with three input modes: (i) text; (ii) image/meme; (iii) short video. Flow: preprocess → (OCR for images) → (VAD+ASR for video) → pack → encoders → fusion → calibration/threshold → outputs. Outputs per item: labels, calibrated probabilities, evidence (highlighted OCR words / transcript spans / caption tokens), per‑modality confidence. Packaging: Docker image; RUNME.sh; response schema JSON. Pass: golden‑set regression tests stable; latency within budget; full reproducibility from seed.
+
+APPENDIX — DEFAULT HYPERPARAMETERS (STARTING POINTS)
+	•	Optimizer: AdamW (β1 0.9, β2 0.98), weight decay 0.01; cosine schedule; warmup 5–10%; grad‑clip 1.0; fp16/bf16. 
+	•	LoRA ranks: text r=16, vision r=8–16; α = 16; dropout 0.05. 
+	•	Resampler: 64–128 latents; dim = 768–1024; depth = 2. 
+	•	Fusion cross‑attn: 2–4 layers; heads = 8; dropout 0.1–0.2. 
+	•	ModDrop: p=0.25 (uniform over modalities present). 
+	•	Augs: MixUp 0.2–0.4, CutMix β 1.0; mild blur/JPEG; text noise (≤3%). 
+	•	Step budgets (1–4 GPUs): see Steps 4–5; always prefer early stopping.
