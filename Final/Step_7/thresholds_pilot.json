@@ -1,0 +1,14 @@
+{
+  "text_expert": {
+    "abuse_hate": 0.15000000000000002,
+    "best_f1": 0.3333333333333333
+  },
+  "vision_expert": {
+    "abuse_hate": 0.2,
+    "best_f1": 0.45833333333333326
+  },
+  "mm_fusion": {
+    "abuse_hate": 0.2,
+    "best_f1": 0.31578947368421056
+  }
+}
