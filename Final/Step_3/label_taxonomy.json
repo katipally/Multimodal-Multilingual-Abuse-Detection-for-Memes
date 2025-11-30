@@ -1,0 +1,44 @@
+{
+  "schema": {
+    "abuse_hate": {
+      "type": "binary",
+      "values": [
+        0,
+        1
+      ],
+      "description": "Hate/abuse present (1) or not (0)"
+    },
+    "offensive": {
+      "type": "binary",
+      "values": [
+        0,
+        1
+      ],
+      "description": "Offensive language present"
+    },
+    "target_type": {
+      "type": "categorical",
+      "values": [
+        "none",
+        "individual",
+        "group",
+        "other",
+        "unknown"
+      ],
+      "description": "Target granularity (if any)"
+    },
+    "target_group": {
+      "type": "multilabel",
+      "description": "Target groups (e.g. women, black, jewish, muslim, lgbtq)"
+    },
+    "aux": {
+      "type": "object",
+      "description": "Dataset-specific raw labels and metadata"
+    }
+  },
+  "datasets": {
+    "hateful_memes": {
+      "notes": "labels_raw in {0,1} mapped to abuse_hate/offensive; target_type='group' if 1 else 'none'"
+    }
+  }
+}
